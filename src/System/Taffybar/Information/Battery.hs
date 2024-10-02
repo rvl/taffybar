@@ -22,7 +22,6 @@ module System.Taffybar.Information.Battery
   ) where
 
 import           BroadcastChan
-import           Control.Concurrent
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
@@ -45,6 +44,8 @@ import           System.Taffybar.DBus.Client.Params
 import           System.Taffybar.DBus.Client.UPower
 import           System.Taffybar.DBus.Client.UPowerDevice
 import           System.Taffybar.Util
+import           UnliftIO.Concurrent (threadDelay)
+import           UnliftIO.MVar (MVar, newMVar, readMVar, swapMVar)
 
 batteryLogPath :: String
 batteryLogPath = "System.Taffybar.Information.Battery"

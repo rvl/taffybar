@@ -18,8 +18,6 @@
 module System.Taffybar.Information.Crypto where
 
 import           BroadcastChan
-import           Control.Concurrent
-import           Control.Exception.Enclosed (catchAny)
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Data.Aeson
@@ -38,6 +36,8 @@ import           System.Log.Logger
 import           System.Taffybar.Context
 import           System.Taffybar.Util
 import           Text.Printf
+import           UnliftIO.MVar (MVar, modifyMVar, newMVar, swapMVar)
+import           UnliftIO.Exception (catchAny)
 
 getSymbolToCoinGeckoId :: MonadIO m => m (M.Map Text Text)
 getSymbolToCoinGeckoId = do

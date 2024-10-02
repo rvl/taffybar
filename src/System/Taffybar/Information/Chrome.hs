@@ -2,7 +2,6 @@
 module System.Taffybar.Information.Chrome where
 
 import           BroadcastChan
-import           Control.Concurrent
 import           Control.Monad
 import           Control.Monad.Trans.Class
 import qualified Data.ByteString as BS
@@ -17,6 +16,8 @@ import           System.Taffybar.Information.EWMHDesktopInfo
 import           System.Taffybar.Information.SafeX11
 import           Text.Read hiding (lift)
 import           Text.Regex
+import           UnliftIO.Concurrent (forkIO)
+import           UnliftIO.MVar (MVar, modifyMVar_, newMVar)
 import           Web.Scotty
 
 logIO :: System.Log.Logger.Priority -> String -> IO ()

@@ -14,9 +14,6 @@
 module System.Taffybar.Widget.Workspaces where
 
 import           Control.Arrow ((&&&))
-import           Control.Concurrent
-import qualified Control.Concurrent.MVar as MV
-import           Control.Exception.Enclosed (catchAny)
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
@@ -51,6 +48,9 @@ import           System.Taffybar.Widget.Generic.AutoSizeImage (autoSizeImage)
 import           System.Taffybar.Widget.Util
 import           System.Taffybar.WindowIcon
 import           Text.Printf
+import           UnliftIO.Concurrent (forkIO)
+import           UnliftIO.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+import           UnliftIO.Exception (catchAny)
 
 data WorkspaceState
   = Active
@@ -85,8 +85,8 @@ data Workspace = Workspace
   } deriving (Show, Eq)
 
 data WorkspacesContext = WorkspacesContext
-  { controllersVar :: MV.MVar (M.Map WorkspaceId WWC)
-  , workspacesVar :: MV.MVar (M.Map WorkspaceId Workspace)
+  { controllersVar :: MVar (M.Map WorkspaceId WWC)
+  , workspacesVar :: MVar (M.Map WorkspaceId Workspace)
   , workspacesWidget :: Gtk.Box
   , workspacesConfig :: WorkspacesConfig
   , taffyContext :: Context
@@ -187,10 +187,10 @@ hideEmpty _ = True
 wLog :: MonadIO m => Priority -> String -> m ()
 wLog l s = liftIO $ logM "System.Taffybar.Widget.Workspaces" l s
 
-updateVar :: MV.MVar a -> (a -> WorkspacesIO a) -> WorkspacesIO a
+updateVar :: MVar a -> (a -> WorkspacesIO a) -> WorkspacesIO a
 updateVar var modify = do
   ctx <- ask
-  lift $ MV.modifyMVar var $ fmap (\a -> (a, a)) . flip runReaderT ctx . modify
+  lift $ modifyMVar var $ fmap (\a -> (a, a)) . flip runReaderT ctx . modify
 
 updateWorkspacesVar :: WorkspacesIO (M.Map WorkspaceId Workspace)
 updateWorkspacesVar = do
@@ -263,7 +263,7 @@ addWidgetsToTopLevel = do
     { controllersVar = controllersRef
     , workspacesWidget = cont
     } <- ask
-  controllersMap <- lift $ MV.readMVar controllersRef
+  controllersMap <- lift $ readMVar controllersRef
   -- Elems returns elements in ascending order of their keys so this will always
   -- add the widgets in the correct order
   mapM_ addWidget $ M.elems controllersMap
@@ -287,8 +287,8 @@ addWidget controller = do
 workspacesNew :: WorkspacesConfig -> TaffyIO Gtk.Widget
 workspacesNew cfg = ask >>= \tContext -> lift $ do
   cont <- Gtk.boxNew Gtk.OrientationHorizontal $ fromIntegral (widgetGap cfg)
-  controllersRef <- MV.newMVar M.empty
-  workspacesRef <- MV.newMVar M.empty
+  controllersRef <- newMVar M.empty
+  workspacesRef <- newMVar M.empty
   let context =
         WorkspacesContext
         { controllersVar = controllersRef
@@ -354,8 +354,8 @@ setControllerWidgetVisibility = do
     , workspacesConfig = cfg
     } <- ask
   lift $ do
-    workspacesMap <- MV.readMVar workspacesRef
-    controllersMap <- MV.readMVar controllersRef
+    workspacesMap <- readMVar workspacesRef
+    controllersMap <- readMVar controllersRef
     forM_ (M.elems workspacesMap) $ \ws ->
       let action = if showWorkspaceFn cfg ws
                    then Gtk.widgetShow
@@ -368,7 +368,7 @@ setControllerWidgetVisibility = do
 doWidgetUpdate :: (WorkspaceId -> WWC -> WorkspacesIO WWC) -> WorkspacesIO ()
 doWidgetUpdate updateController = do
   c@WorkspacesContext { controllersVar = controllersRef } <- ask
-  lift $ MV.modifyMVar_ controllersRef $ \controllers -> do
+  lift $ modifyMVar_ controllersRef $ \controllers -> do
     wLog DEBUG "Updating controllers ref"
     controllersList <-
       mapM
@@ -386,8 +386,8 @@ updateWorkspaceControllers = do
     , workspacesWidget = cont
     , workspacesConfig = cfg
     } <- ask
-  workspacesMap <- lift $ MV.readMVar workspacesRef
-  controllersMap <- lift $ MV.readMVar controllersRef
+  workspacesMap <- lift $ readMVar workspacesRef
+  controllersMap <- lift $ readMVar controllersRef
 
   let newWorkspacesSet = M.keysSet workspacesMap
       existingWorkspacesSet = M.keysSet controllersMap
@@ -583,12 +583,12 @@ instance WorkspaceWidgetController LabelController where
 data IconWidget = IconWidget
   { iconContainer :: Gtk.EventBox
   , iconImage :: Gtk.Image
-  , iconWindow :: MV.MVar (Maybe WindowData)
+  , iconWindow :: MVar (Maybe WindowData)
   , iconForceUpdate :: IO ()
   }
 
 getPixbufForIconWidget :: Bool
-                       -> MV.MVar (Maybe WindowData)
+                       -> MVar (Maybe WindowData)
                        -> Int32
                        -> WorkspacesIO (Maybe Gdk.Pixbuf)
 getPixbufForIconWidget transparentOnNone dataVar size = do
@@ -596,7 +596,7 @@ getPixbufForIconWidget transparentOnNone dataVar size = do
   let tContext = taffyContext ctx
       getPBFromData = getWindowIconPixbuf $ workspacesConfig ctx
       getPB' = runMaybeT $
-               MaybeT (lift $ MV.readMVar dataVar) >>= MaybeT . getPBFromData size
+               MaybeT (lift $ readMVar dataVar) >>= MaybeT . getPBFromData size
       getPB = if transparentOnNone
               then maybeTCombine getPB' (Just <$> pixBufFromColor size 0)
               else getPB'
@@ -606,7 +606,7 @@ buildIconWidget :: Bool -> Workspace -> WorkspacesIO IconWidget
 buildIconWidget transparentOnNone ws = do
   ctx <- ask
   lift $ do
-    windowVar <- MV.newMVar Nothing
+    windowVar <- newMVar Nothing
     img <- Gtk.imageNew
     refreshImage <-
       autoSizeImage img
@@ -619,7 +619,7 @@ buildIconWidget transparentOnNone ws = do
     _ <-
       Gtk.onWidgetButtonPressEvent ebox $
       const $ liftIO $ do
-        info <- MV.readMVar windowVar
+        info <- readMVar windowVar
         case info of
           Just updatedInfo ->
             flip runReaderT ctx $
@@ -665,7 +665,7 @@ updateWindowIconsById ic windowIds =
   where
     maybeUpdateWindowIcon widget =
       do
-        info <- lift $ MV.readMVar $ iconWindow widget
+        info <- lift $ readMVar $ iconWindow widget
         when (maybe False (flip elem windowIds . windowId) info) $
          updateIconWidget ic widget info
 
@@ -854,7 +854,7 @@ buildButtonController contentsBuilder workspace = do
     _ <-
       Gtk.onWidgetScrollEvent ebox $ \scrollEvent -> do
         dir <- Gdk.getEventScrollDirection scrollEvent
-        workspaces <- liftIO $ MV.readMVar workspacesRef
+        workspaces <- readMVar workspacesRef
         let switchOne a =
               liftIO $
               flip runReaderT ctx $

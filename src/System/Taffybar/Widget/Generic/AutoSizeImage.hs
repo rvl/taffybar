@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module System.Taffybar.Widget.Generic.AutoSizeImage where
 
-import qualified Control.Concurrent.MVar as MV
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Data.Int
@@ -15,6 +14,7 @@ import           System.Log.Logger
 import           System.Taffybar.Util
 import           System.Taffybar.Widget.Util
 import           Text.Printf
+import           UnliftIO.MVar (modifyMVar_, newMVar, readMVar)
 
 imageLog :: Priority -> String -> IO ()
 imageLog = logM "System.Taffybar.Widget.Generic.AutoSizeImage"
@@ -107,7 +107,7 @@ autoSizeImage image getPixbuf orientation = liftIO $ do
 
   _ <- widgetSetClassGI image "auto-size-image"
 
-  lastAllocation <- MV.newMVar 0
+  lastAllocation <- newMVar 0
   -- XXX: Gtk seems to report information about padding etc inconsistently,
   -- which is why we look it up once, at startup. This means that we won't
   -- properly react to changes to these values, which could be a pretty nasty
@@ -125,10 +125,10 @@ autoSizeImage image getPixbuf orientation = liftIO $ do
                 Gtk.OrientationHorizontal -> height
                 _ -> width
 
-        previousSize <- MV.readMVar lastAllocation
+        previousSize <- readMVar lastAllocation
 
         when (size /= previousSize || force) $ do
-          MV.modifyMVar_ lastAllocation $ const $ return size
+          modifyMVar_ lastAllocation $ const $ return size
 
           pixbuf <- getPixbuf size
           pbWidth <- fromMaybe 0 <$> traverse Gdk.getPixbufWidth pixbuf

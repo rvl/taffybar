@@ -12,7 +12,6 @@ module System.Taffybar.Widget.Generic.VerticalBar (
   defaultBarConfigIO
   ) where
 
-import           Control.Concurrent
 import           Control.Monad
 import           Control.Monad.IO.Class
 import qualified GI.Cairo.Render as C
@@ -20,6 +19,7 @@ import           GI.Cairo.Render.Connector
 import           GI.Gtk hiding (widgetGetAllocatedSize)
 import           System.Taffybar.Util
 import           System.Taffybar.Widget.Util
+import           UnliftIO.MVar (MVar, modifyMVar_, newMVar, readMVar)
 
 newtype VerticalBarHandle = VBH (MVar VerticalBarState)
 data VerticalBarState = VerticalBarState

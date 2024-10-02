@@ -1,6 +1,5 @@
 module System.Taffybar.WindowIcon where
 
-import           Control.Concurrent
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
@@ -30,6 +29,7 @@ import           System.Environment.XDG.DesktopEntry
 import           System.Taffybar.Util
 import           System.Taffybar.Widget.Util
 import           Text.Printf
+import           UnliftIO.MVar (readMVar)
 
 type ColorRGBA = Word32
 
