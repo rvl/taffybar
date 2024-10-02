@@ -64,7 +64,6 @@ module System.Taffybar.Information.X11DesktopInfo
   ) where
 
 import Codec.Binary.UTF8.String as UTF8
-import qualified Control.Concurrent.MVar as MV
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
@@ -77,6 +76,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import GHC.Generics (Generic)
 import Graphics.X11.Xrandr (XRRScreenResources(..), XRROutputInfo(..), xrrGetOutputInfo, xrrGetScreenResources, xrrGetOutputPrimary)
 import System.Taffybar.Information.SafeX11 hiding (displayName)
+import UnliftIO.MVar (MVar, newMVar, readMVar, modifyMVar)
 
 -- | Represents a connection to an X11 display.
 -- Use 'getX11Context' to construct one of these.
@@ -84,7 +84,7 @@ data X11Context = X11Context
   { ctxDisplayName :: DisplayName
   , ctxDisplay :: Display
   , ctxRoot :: Window
-  , ctxAtomCache :: MV.MVar [(String, Atom)]
+  , ctxAtomCache :: MVar [(String, Atom)]
   }
 
 -- | Specifies an X11 display to connect to.
@@ -193,8 +193,8 @@ getAtom :: String -> X11Property Atom
 getAtom s = do
   d <- asks ctxDisplay
   cacheVar <- asks ctxAtomCache
-  a <- lift $ lookup s <$> MV.readMVar cacheVar
-  let updateCacheAction = lift $ MV.modifyMVar cacheVar updateCache
+  a <- lift $ lookup s <$> readMVar cacheVar
+  let updateCacheAction = lift $ modifyMVar cacheVar updateCache
       updateCache currentCache =
         do
           atom <- internAtom d s False
@@ -238,7 +238,7 @@ getX11Context :: DisplayName -> IO X11Context
 getX11Context ctxDisplayName = do
   d <- openDisplay $ fromDisplayName ctxDisplayName
   ctxRoot <- rootWindow d $ defaultScreen d
-  ctxAtomCache <- MV.newMVar []
+  ctxAtomCache <- newMVar []
   return $ X11Context{ctxDisplay=d,..}
 
 -- | Apply the given function to the given window in order to obtain the X11

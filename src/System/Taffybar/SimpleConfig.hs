@@ -24,7 +24,6 @@ module System.Taffybar.SimpleConfig
   , StrutSize(..)
   ) where
 
-import qualified Control.Concurrent.MVar as MV
 import           Control.Monad
 import           Control.Monad.Trans.Class
 import           Data.Default (Default(..))
@@ -39,6 +38,7 @@ import           System.Taffybar
 import qualified System.Taffybar.Context as BC (BarConfig(..), TaffybarConfig(..))
 import           System.Taffybar.Context hiding (TaffybarConfig(..), BarConfig(..))
 import           System.Taffybar.Util
+import           UnliftIO.MVar (MVar, modifyMVar, newMVar)
 
 -- | An ADT representing the edge of the monitor along which taffybar should be
 -- displayed.
@@ -125,7 +125,7 @@ toBarConfig config monitor = do
     , BC.barId = barId
     }
 
-newtype SimpleBarConfigs = SimpleBarConfigs (MV.MVar [(Int, BC.BarConfig)])
+newtype SimpleBarConfigs = SimpleBarConfigs (MVar [(Int, BC.BarConfig)])
 
 {-# DEPRECATED toTaffyConfig "Use toTaffybarConfig instead" #-}
 toTaffyConfig :: SimpleTaffyConfig -> BC.TaffybarConfig
@@ -143,7 +143,7 @@ toTaffybarConfig conf =
   where
     configGetter = do
       SimpleBarConfigs configsVar <-
-        getStateDefault $ lift (SimpleBarConfigs <$> MV.newMVar [])
+        getStateDefault $ lift (SimpleBarConfigs <$> newMVar [])
       monitorNumbers <- monitorsAction conf
 
       let lookupWithIndex barConfigs monitorNumber =
@@ -161,7 +161,7 @@ toTaffybarConfig conf =
             let result = map snd newlyCreated ++ alreadyPresentConfigs
             return (barConfigs ++ newlyCreated, result)
 
-      lift $ MV.modifyMVar configsVar lookupAndUpdate
+      lift $ modifyMVar configsVar lookupAndUpdate
 
 -- | Start taffybar using dyre with a 'SimpleTaffybarConfig'.
 simpleDyreTaffybar :: SimpleTaffyConfig -> IO ()

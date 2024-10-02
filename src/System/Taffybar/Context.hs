@@ -60,9 +60,6 @@ module System.Taffybar.Context
   ) where
 
 import           Control.Arrow ((&&&), (***))
-import           Control.Concurrent (forkIO)
-import qualified Control.Concurrent.MVar as MV
-import           Control.Exception.Enclosed (catchAny)
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
@@ -91,6 +88,9 @@ import           System.Taffybar.Information.X11DesktopInfo
 import           System.Taffybar.Util
 import           System.Taffybar.Widget.Util
 import           Text.Printf
+import           UnliftIO.Concurrent (forkIO)
+import           UnliftIO.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
+import           UnliftIO.Exception (catchAny)
 import           Unsafe.Coerce
 
 logIO :: Priority -> String -> IO ()
@@ -186,17 +186,17 @@ instance Default TaffybarConfig where
 data Context = Context
   {
   -- | The X11Context that will be used to service X11Property requests.
-    x11ContextVar :: MV.MVar X11Context
+    x11ContextVar :: MVar X11Context
   -- | The handlers which will be evaluated against incoming X11 events.
-  , listeners :: MV.MVar SubscriptionList
+  , listeners :: MVar SubscriptionList
   -- | A collection of miscellaneous pieces of state which are keyed by their
   -- types. Most new pieces of state should go here, rather than in a new field
   -- in 'Context'. State stored here is typically accessed through
   -- 'getStateDefault'.
-  , contextState :: MV.MVar (M.Map TypeRep Value)
+  , contextState :: MVar (M.Map TypeRep Value)
   -- | Used to track the windows that taffybar is currently controlling, and
   -- which 'BarConfig' objects they are associated with.
-  , existingWindows :: MV.MVar [(BarConfig, Gtk.Window)]
+  , existingWindows :: MVar [(BarConfig, Gtk.Window)]
   -- | The shared user session 'DBus.Client'.
   , sessionDBusClient :: DBus.Client
   -- | The shared system session 'DBus.Client'.
@@ -223,10 +223,10 @@ buildContext TaffybarConfig
   sDBusC <- DBus.connectSystem
   _ <- DBus.requestName dbusC "org.taffybar.Bar"
        [DBus.nameAllowReplacement, DBus.nameReplaceExisting]
-  listenersVar <- MV.newMVar []
-  state <- MV.newMVar M.empty
-  x11Context <- getX11Context def >>= MV.newMVar
-  windowsVar <- MV.newMVar []
+  listenersVar <- newMVar []
+  state <- newMVar M.empty
+  x11Context <- getDefaultCtx def >>= newMVar
+  windowsVar <- newMVar []
   let context = Context
                 { x11ContextVar = x11Context
                 , listeners = listenersVar
@@ -277,7 +277,7 @@ buildBarWindow context barConfig = do
   void $ Gtk.onWidgetDestroy window $ do
     let bId = showBarId barConfig
     logC INFO $ printf "Window for Taffybar(id=%s) destroyed" bId
-    MV.modifyMVar_ (existingWindows context) (pure . filter ((/=) window . sel2))
+    modifyMVar_ (existingWindows context) (pure . filter ((/=) window . sel2))
     logC DEBUG $ printf "Window for Taffybar(id=%s) unregistered" bId
 
   box <- Gtk.boxNew Gtk.OrientationHorizontal $ fromIntegral $
@@ -376,13 +376,13 @@ refreshTaffyWindows = mapReaderT postGUIASync $ do
 
           return $ newWindowPairs ++ remainingWindows
 
-  lift $ MV.modifyMVar_ windowsVar rebuildWindows
+  lift $ modifyMVar_ windowsVar rebuildWindows
   logC DEBUG "Finished refreshing windows"
   return ()
 
 -- | Unconditionally delete all existing Taffybar top-level windows.
 removeTaffyWindows :: TaffyIO ()
-removeTaffyWindows = asks existingWindows >>= liftIO . MV.readMVar >>= deleteWindows
+removeTaffyWindows = asks existingWindows >>= readMVar >>= deleteWindows
   where
     deleteWindows = mapM_ (sequenceT . (msg *** del))
 
@@ -408,8 +408,8 @@ exitTaffybar ctx = do
   postGUIASync $ runReaderT removeTaffyWindows ctx
   Gtk.mainQuit
 
-asksContextVar :: (r -> MV.MVar b) -> ReaderT r IO b
-asksContextVar getter = asks getter >>= lift . MV.readMVar
+asksContextVar :: (r -> MVar b) -> ReaderT r IO b
+asksContextVar getter = asks getter >>= lift . readMVar
 
 -- | Run a function needing an X11 connection in 'TaffyIO'.
 runX11 :: X11Property a -> TaffyIO a
@@ -446,7 +446,7 @@ putState :: forall t. Typeable t => Taffy IO t -> Taffy IO t
 putState getValue = do
   contextVar <- asks contextState
   ctx <- ask
-  lift $ MV.modifyMVar contextVar $ \contextStateMap ->
+  lift $ modifyMVar contextVar $ \contextStateMap ->
     let theType = typeRep (Proxy :: Proxy t)
         currentValue = M.lookup theType contextStateMap
         insertAndReturn value =
@@ -458,7 +458,7 @@ putState getValue = do
 
 -- | A version of 'forkIO' in 'TaffyIO'.
 taffyFork :: ReaderT r IO () -> ReaderT r IO ()
-taffyFork = void . mapReaderT forkIO
+taffyFork = void . forkIO
 
 startX11EventHandler :: Taffy IO ()
 startX11EventHandler = taffyFork $ do
@@ -474,7 +474,7 @@ startX11EventHandler = taffyFork $ do
 unsubscribe :: Unique -> Taffy IO ()
 unsubscribe identifier = do
   listenersVar <- asks listeners
-  lift $ MV.modifyMVar_ listenersVar $ return . filter ((== identifier) . fst)
+  lift $ modifyMVar_ listenersVar $ return . filter ((== identifier) . fst)
 
 -- | Subscribe to all incoming events on the X11 event loop. The returned
 -- "Unique" value can be used to unregister the listener using "unsuscribe".
@@ -487,7 +487,7 @@ subscribeToAll listener = do
     -- that occur without MonoLocalBinds, but it still seems to be necessary
     addListener :: SubscriptionList -> SubscriptionList
     addListener = ((identifier, listener):)
-  lift $ MV.modifyMVar_ listenersVar (return . addListener)
+  lift $ modifyMVar_ listenersVar (return . addListener)
   return identifier
 
 -- | Subscribe to X11 "PropertyEvent"s where the property changed is in the

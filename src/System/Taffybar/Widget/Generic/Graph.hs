@@ -20,7 +20,6 @@ module System.Taffybar.Widget.Generic.Graph (
   , defaultGraphConfig
   ) where
 
-import           Control.Concurrent
 import           Control.Monad ( when )
 import           Control.Monad.IO.Class
 import           Data.Default ( Default(..) )
@@ -33,6 +32,7 @@ import qualified GI.Cairo.Render.Matrix as M
 import qualified GI.Gtk as Gtk
 import           System.Taffybar.Util
 import           System.Taffybar.Widget.Util
+import           UnliftIO.MVar (MVar, modifyMVar_, newMVar, readMVar)
 
 newtype GraphHandle = GH (MVar GraphState)
 data GraphState =

@@ -15,8 +15,6 @@
 
 module System.Taffybar.DBus.Toggle ( handleDBusToggles ) where
 
-import qualified Control.Concurrent.MVar as MV
-import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
@@ -36,6 +34,8 @@ import           System.Taffybar.Context
 import           System.Taffybar.Util
 import           Text.Printf
 import           Text.Read ( readMaybe )
+import           UnliftIO.MVar (MVar, modifyMVar_, newMVar, readMVar)
+import           UnliftIO.Exception (SomeException, catch)
 
 -- $usage
 --
@@ -90,16 +90,16 @@ taffybarToggleInterface = "taffybar.toggle"
 toggleStateFile :: IO FilePath
 toggleStateFile = (</> "toggle_state.dat") <$> taffyStateDir
 
-newtype TogglesMVar = TogglesMVar (MV.MVar (M.Map Int Bool))
+newtype TogglesMVar = TogglesMVar (MVar (M.Map Int Bool))
 
 getTogglesVar :: TaffyIO TogglesMVar
-getTogglesVar = getStateDefault $ lift (TogglesMVar <$> MV.newMVar M.empty)
+getTogglesVar = getStateDefault $ lift (TogglesMVar <$> newMVar M.empty)
 
 toggleBarConfigGetter :: BarConfigGetter -> BarConfigGetter
 toggleBarConfigGetter getConfigs = do
   barConfigs <- getConfigs
   TogglesMVar enabledVar <- getTogglesVar
-  numToEnabled <- lift $ MV.readMVar enabledVar
+  numToEnabled <- lift $ readMVar enabledVar
   let isEnabled monNumber = fromMaybe True $ M.lookup monNumber numToEnabled
       isConfigEnabled =
         isEnabled . fromIntegral . fromMaybe 0 . strutMonitor . strutConfig
@@ -112,7 +112,7 @@ exportTogglesInterface = do
   lift $ taffyStateDir >>= createDirectoryIfMissing True
   stateFile <- lift toggleStateFile
   let toggleTaffyOnMon fn mon = flip runReaderT ctx $ do
-        lift $ MV.modifyMVar_ enabledVar $ \numToEnabled -> do
+        lift $ modifyMVar_ enabledVar $ \numToEnabled -> do
           let current = fromMaybe True $ M.lookup mon numToEnabled
               result = M.insert mon (fn current) numToEnabled
           logIO DEBUG $ printf "Toggle state before: %s, after %s"
@@ -160,7 +160,7 @@ dbusTogglesStartupHook = do
         readMaybe <$> readFile stateFilepath
       else
         return Nothing
-    MV.modifyMVar_ enabledVar $ const $ return $ fromMaybe M.empty mStartingMap
+    modifyMVar_ enabledVar $ const $ return $ fromMaybe M.empty mStartingMap
   logT DEBUG "Exporting toggles interface"
   exportTogglesInterface
 

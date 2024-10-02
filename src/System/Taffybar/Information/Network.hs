@@ -16,8 +16,6 @@
 
 module System.Taffybar.Information.Network where
 
-import qualified Control.Concurrent.MVar as MV
-import           Control.Exception (catch, SomeException)
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Maybe (MaybeT(..))
@@ -27,6 +25,8 @@ import           Data.Time.Clock.System
 import           Safe ( atMay, initSafe, readDef )
 import           System.Taffybar.Information.StreamInfo ( getParsedInfo )
 import           System.Taffybar.Util
+import           UnliftIO.MVar (modifyMVar_, newMVar)
+import           UnliftIO.Exception (catch, SomeException)
 
 networkInfoFile :: FilePath
 networkInfoFile = "/proc/net/dev"
@@ -94,13 +94,13 @@ monitorNetworkInterfaces
   :: RealFrac a1
   => a1 -> ([(String, (Rational, Rational))] -> IO ()) -> IO ()
 monitorNetworkInterfaces interval onUpdate = void $ do
-  samplesVar <- MV.newMVar []
+  samplesVar <- newMVar []
   let sampleToSpeeds (device, (s1, s2)) = (device, getSpeed s1 s2)
       doOnUpdate samples = do
         let speedInfo = map sampleToSpeeds samples
         onUpdate speedInfo
         return samples
-      doUpdate = MV.modifyMVar_ samplesVar (updateSamples >=> doOnUpdate)
+      doUpdate = modifyMVar_ samplesVar (updateSamples >=> doOnUpdate)
   foreverWithDelay interval doUpdate
 
 updateSamples ::

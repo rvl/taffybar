@@ -18,7 +18,6 @@
 module System.Taffybar.Widget.MPRIS2 where
 
 import           Control.Arrow
-import qualified Control.Concurrent.MVar as MV
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Class
@@ -46,6 +45,7 @@ import           System.Taffybar.Widget.Generic.AutoSizeImage
 import           System.Taffybar.Widget.Util
 import           System.Taffybar.WindowIcon
 import           Text.Printf
+import           UnliftIO.MVar (modifyMVar_, newMVar, readMVar)
 
 mprisLog :: (MonadIO m, Show t) => Priority -> String -> t -> m ()
 mprisLog = logPrintF "System.Taffybar.Widget.MPRIS2"
@@ -200,7 +200,7 @@ mpris2NewWithConfig config = ask >>= \ctx -> asks sessionDBusClient >>= \client 
   grid <- Gtk.gridNew
   outerWidget <- Gtk.toWidget grid >>= mprisWidgetWrapper config
   vFillCenter grid
-  playerWidgetsVar <- MV.newMVar M.empty
+  playerWidgetsVar <- newMVar M.empty
   let
     updateWidget = updatePlayerWidget config
     updatePlayerWidgets nowPlayings playerWidgets = do
@@ -222,7 +222,7 @@ mpris2NewWithConfig config = ask >>= \ctx -> asks sessionDBusClient >>= \client 
       return $ M.union updatedWidgets playerWidgets
 
     updatePlayerWidgetsVar nowPlayings = postGUISync $
-      MV.modifyMVar_ playerWidgetsVar $ flip runReaderT ctx .
+      modifyMVar_ playerWidgetsVar $ flip runReaderT ctx .
         updatePlayerWidgets nowPlayings
 
     setPlayingClass = do
@@ -245,7 +245,7 @@ mpris2NewWithConfig config = ask >>= \ctx -> asks sessionDBusClient >>= \client 
     propMatcher = matchAny { matchPath = Just "/org/mpris/MediaPlayer2" }
 
     handleNameOwnerChanged _ name _ _ = do
-      playerWidgets <- MV.readMVar playerWidgetsVar
+      playerWidgets <- readMVar playerWidgetsVar
       busName <- parseBusName name
       when (busName `M.member` playerWidgets) doUpdate
 
