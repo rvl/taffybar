@@ -67,6 +67,7 @@ library
                , http-client >= 0.5
                , http-client-tls
                , http-types
+               , managed
                , multimap >= 1.2.1
                , parsec >= 3.1
                , process >= 1.0.1.1
