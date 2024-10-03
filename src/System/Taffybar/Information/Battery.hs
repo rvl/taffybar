@@ -44,7 +44,7 @@ import           System.Taffybar.DBus.Client.Params
 import           System.Taffybar.DBus.Client.UPower
 import           System.Taffybar.DBus.Client.UPowerDevice
 import           System.Taffybar.Util
-import           UnliftIO.Concurrent (threadDelay)
+import           UnliftIO.Concurrent (forkIO, threadDelay)
 import           UnliftIO.MVar (MVar, newMVar, readMVar, swapMVar)
 
 batteryLogPath :: String
@@ -224,7 +224,7 @@ monitorDisplayBattery propertiesToMonitor = do
   client <- asks systemDBusClient
   infoVar <- lift $ newMVar $ infoMapToBatteryInfo M.empty
   chan <- newBroadcastChan
-  taffyFork $ do
+  void $ forkIO $ do
     labelMyThread "monitorDisplayBattery"
     ctx <- ask
     let warnOfFailedGetDevice err =

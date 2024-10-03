@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -----------------------------------------------------------------------------
@@ -27,7 +28,6 @@ module System.Taffybar.Information.X11DesktopInfo
   ( -- * Context
     X11Context
   , DisplayName(..)
-  , getX11Context
   , withX11Context
 
   -- * Properties
@@ -35,6 +35,8 @@ module System.Taffybar.Information.X11DesktopInfo
   , X11PropertyT
 
   -- ** Event loop
+  , withX11EventLoop
+  , withEventLoop
   , eventLoop
 
   -- ** Context getters
@@ -63,9 +65,11 @@ module System.Taffybar.Information.X11DesktopInfo
   , sendWindowEvent
   ) where
 
-import Codec.Binary.UTF8.String as UTF8
+import qualified Codec.Binary.UTF8.String as UTF8
+import qualified Control.Exception as E
 import Control.Monad
-import Control.Monad.IO.Class
+import Control.Monad.IO.Class (MonadIO(..))
+import Control.Monad.IO.Unlift (MonadUnliftIO(..))
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Reader
 import Data.Bits (testBit, (.|.))
@@ -73,13 +77,21 @@ import Data.Default (Default(..))
 import Data.List (elemIndex)
 import Data.List.Split (endBy)
 import Data.Maybe (fromMaybe, listToMaybe)
+import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Generics (Generic)
+import GHC.Stack (HasCallStack)
 import Graphics.X11.Xrandr (XRRScreenResources(..), XRROutputInfo(..), xrrGetOutputInfo, xrrGetScreenResources, xrrGetOutputPrimary)
+import System.Log.Logger (Priority (..), logM)
 import System.Taffybar.Information.SafeX11 hiding (displayName)
-import UnliftIO.MVar (MVar, newMVar, readMVar, modifyMVar)
+import System.Taffybar.Util (labelMyThread)
+import UnliftIO.Async (withAsync)
+import UnliftIO.Concurrent (forkFinally, threadDelay, killThread)
+import UnliftIO.Exception (bracket, throwIO, throwString, SomeAsyncException, bracket_)
+import UnliftIO.MVar (MVar, newMVar, newEmptyMVar, readMVar, modifyMVar, putMVar, takeMVar)
+import UnliftIO.Timeout (timeout)
 
 -- | Represents a connection to an X11 display.
--- Use 'getX11Context' to construct one of these.
+-- Use 'withX11Context' to construct one of these.
 data X11Context = X11Context
   { ctxDisplayName :: DisplayName
   , ctxDisplay :: Display
@@ -109,19 +121,9 @@ type X11Property a = X11PropertyT IO a
 type X11Window = Window
 type PropertyFetcher a = Display -> Atom -> X11Window -> IO (Maybe [a])
 
--- | Makes a connection to the default X11 display using
--- 'getX11Context' and puts the current display and root window
--- objects inside a 'ReaderT' transformer for further computation.
-withX11Context :: DisplayName -> X11Property a -> IO a
-withX11Context dn fun = do
-  ctx <- getX11Context dn
-  res <- runReaderT fun ctx
-  closeDisplay (ctxDisplay ctx)
-  return res
-
--- | An X11Property that returns the 'Display' object stored in the
+-- | An 'X11PropertyT' that returns the 'Display' object stored in the
 -- 'X11Context'.
-getDisplay :: X11Property Display
+getDisplay :: Monad m => X11PropertyT m Display
 getDisplay = ctxDisplay <$> ask
 
 doRead :: Integral a => b -> ([a] -> b)
@@ -189,57 +191,224 @@ getVisibleTags :: X11Property [String]
 getVisibleTags = readAsListOfString Nothing "_XMONAD_VISIBLE_WORKSPACES"
 
 -- | Return the 'Atom' with the given name.
-getAtom :: String -> X11Property Atom
+getAtom :: MonadUnliftIO m => String -> X11PropertyT m Atom
 getAtom s = do
   d <- asks ctxDisplay
   cacheVar <- asks ctxAtomCache
-  a <- lift $ lookup s <$> readMVar cacheVar
-  let updateCacheAction = lift $ modifyMVar cacheVar updateCache
-      updateCache currentCache =
-        do
-          atom <- internAtom d s False
-          return ((s, atom):currentCache, atom)
+  a <- lookup s <$> readMVar cacheVar
+  let updateCacheAction = modifyMVar cacheVar $ \cache -> do
+          atom <- liftIO $ internAtom d s False
+          return ((s, atom):cache, atom)
   maybe updateCacheAction return a
 
--- | Spawn a new thread and listen inside it to all incoming events, invoking
--- the given function to every event of type @MapNotifyEvent@ that arrives, and
--- subscribing to all events of this type emitted by newly created windows.
-eventLoop :: (Event -> IO ()) -> X11Property ()
-eventLoop dispatch = do
-  d <- asks ctxDisplay
-  w <- asks ctxRoot
-  liftIO $ do
-    selectInput d w $ propertyChangeMask .|. substructureNotifyMask
-    allocaXEvent $ \e -> forever $ do
-      event <- nextEvent d e >> getEvent e
+-- | Starts an XLib event loop which listens to incoming events of:
+--
+--   * @PropertyChangeMask@ (i.e. 'Graphics.X11.Types.propertyNotify' events)
+--   * @SubstructureNotifyMask@ (includes 'Graphics.X11.Types.mapNotify')
+--   * @StructureNotifyMask@ (includes 'Graphics.X11.Types.clientMessage')
+--
+-- The given handler is invoked for each 'Graphics.X11.Xlib.Extras.Event' received.
+--
+-- When an event of type 'Graphics.X11.Xlib.Extras.MapNotifyEvent' is
+-- emitted by a newly created window, 'eventLoop' will also listen for
+-- 'Graphics.X11.Types.propertyNotify' events on that window.
+eventLoop
+  :: (HasCallStack, MonadUnliftIO m)
+  => m () -- ^ Ready notification.
+  -> (Event -> X11PropertyT m ()) -- ^ Event handler.
+  -> X11PropertyT m a -- ^ Never returns.
+eventLoop ready dispatch = do
+  X11Context{..} <- ask
+  withRunInIO $ \run -> do
+    labelMyThread "X11EventLoop"
+    selectInput ctxDisplay ctxRoot $
+      propertyChangeMask .|. substructureNotifyMask .|. structureNotifyMask
+    sync ctxDisplay False
+    run $ lift ready
+    allocaXEvent $ \xe -> forever $ do
+      nextEventInterruptible
+        (nextEventUnblocker ctxDisplayName)
+        ctxDisplay xe
+      event <- getEvent xe
       case event of
         MapNotifyEvent { ev_window = window } ->
-          selectInput d window propertyChangeMask
+          selectInput ctxDisplay window propertyChangeMask
         _ -> return ()
-      dispatch event
+      run (dispatch event)
+
+-- | Send a dummy 'ClientMessageEvent' event to root window in order
+-- to unblock 'nextEvent'.
+--
+-- Open a new 'Display' connection to do this because we shouldn't use
+-- the same display connection concurrently.
+nextEventUnblocker :: HasCallStack => DisplayName -> SomeAsyncException -> IO ()
+nextEventUnblocker dn e = logAround DEBUG ("nextEventUnblocker: " ++ show e) $
+  withX11Context dn $ runReaderT $ sendCommandEvent 0 0
+
+-- | Block until an 'Event' arrives on the given X11 'Display'.
+-- Special hacks added are added so that asynchronous
+-- exceptions cause it to promptly unblock.
+--
+-- It's important that 'nextEvent' can be cancelled, so that Taffybar
+-- itself can be stopped, reloaded, and restarted in the same process,
+-- without leaking resources or being crashed by XLib.
+--
+-- This is a bit of a mess because 'nextEvent' -- being a FFI call --
+-- is not interruptible. Even if the @InterruptibleFFI@ extension is used,
+-- it's still not interruptible. ('XNextEvent' seems to be resistant to the
+-- [@SIGPIPE@ method](https://downloads.haskell.org/ghc/9.6.6/docs/users_guide/exts/ffi.html#interruptible-foreign-calls)
+-- of interrupting FFI calls.)
+--
+-- So we fork a thread to run 'nextEvent' and wait for an MVar to
+-- receive its result. Under normal operation, the thread will finish
+-- after an event arrives. But if an asynchronous exception is thrown,
+-- this thread will linger vexatiously.
+--
+-- To encourage 'nextEvent' to return, after a 200ms grace period, we
+-- invoke the unblocker 'IO ()' action. The unblocker sends a dummy X
+-- event known to match the event mask which 'nextEvent' is waiting
+-- for.
+--
+-- After invoking the unblocker, we allow another 200ms for
+-- 'nextEvent' to return. If 'nextEvent' is still blocked now, then it
+-- will probably never unblock.
+--
+-- Waiting for 'nextEvent' to actually return is most useful for unit
+-- tests, where 'eventLoop' will be run repeatedly. We don't want
+-- 'nextEvent' threads to pile up until the X server connection limit
+-- is reached.
+--
+-- Also in unit tests, we don't want to stop @Xvfb@ until we have
+-- closed our 'Display' connection. And we don't want to call
+-- 'closeDisplay' while 'nextEvent' is still in progress. In either of
+-- these cases, XLib will crash the process.
+nextEventInterruptible
+  :: HasCallStack
+  => (SomeAsyncException -> IO ()) -- ^ Unblocker
+  -> Display -- ^ Wait for event on this display connection.
+  -> XEventPtr -- ^ Pre-allocated destination for event.
+  -> IO ()
+nextEventInterruptible unblocker d xe = logAround DEBUG "nextEventInterruptible" $ do
+  result <- newEmptyMVar
+
+  -- Run nextEvent in a thread. This is a FFI call which is marked
+  -- as interruptible, but is resistant to SIGPIPE.
+  -- A new XEvent is allocated every time because each nextEvent call
+  -- is running in a new thread.
+  let eventThread = do
+        labelMyThread "XNextEvent"
+        nextEvent d xe
+  t <- forkFinally eventThread (putMVar result)
+
+  -- Block waiting for eventThread to return.
+  -- Waiting for an MVar is interruptible of course.
+  -- If an async exception has been thrown, apply plunger.
+  -- Avoid UnliftIO.catch because of uninterruptibleMask.
+  r <- E.catch (takeMVar result) $ \e -> do
+    logHere INFO $ "nextEvent: caught " ++ show e
+    timeout 200_000 (takeMVar result) >>= \case
+      Just _ -> logHere INFO "nextEvent: stopped within 200ms"
+      Nothing -> do
+        logHere INFO "nextEvent: didn't stop within 200ms - calling unblocker"
+        unblocker e -- fixme: forkIOWithUnmask?
+        logHere INFO "nextEvent: waiting for effects of unblocker"
+        timeout 200_000 (takeMVar result) >>= \case
+          Just _ -> logHere NOTICE "nextEvent: unblocking success"
+          Nothing -> do
+            logHere WARNING "nextEvent: unblocking failure"
+            throwString "nextEvent: after unblocking did not cancel within 200msec"
+    logHere DEBUG "nextEvent: killing thread for good luck"
+    killThread t
+    logHere NOTICE "nextEvent: re-throwing the async exception"
+    throwIO e
+
+  either throwIO pure r
+
+-- | The combination of 'withEventLoop' and 'withX11Context'.
+--
+-- Opens a new connection to the given X11 display and runs an event
+-- handling loop in a thread whilst the given action is running.
+--
+-- The event handler is an 'X11PropertyT' action.
+withX11EventLoop
+  :: MonadUnliftIO m
+  => DisplayName -- ^ Open connection to this X11 display
+  -> (Event -> X11PropertyT m ()) -- ^ Event handler
+  -> m a  -- ^ Main action
+  -> m a
+withX11EventLoop dn h = withX11Context dn . runReaderT . withEventLoop h
+
+-- | Fork an 'eventLoop' thread to handle X11 events in the background
+-- while running the given action.
+--
+-- Events will be dispatched synchronously in the 'eventLoop' thread
+-- by the given handler function.
+--
+-- NB: The event loop needs its own 'X11Context' to separately handle
+-- communications from the X server. The 'X11Context' should not be
+-- shared with other threads.
+withEventLoop
+  :: (HasCallStack, MonadUnliftIO m)
+  => (Event -> X11PropertyT m ())
+  -> m a
+  -> X11PropertyT m a
+withEventLoop dispatch action = do
+  ready <- newEmptyMVar
+  let eventLoop' = eventLoop (putMVar ready ()) dispatch
+      action' = do
+        takeMVar ready
+        r <- lift $ slowDown 100_000 action
+        getDisplay >>= liftIO . flip sync False
+        pure r
+
+  withAsync eventLoop' (const action')
+
+-- | Ensures than an action blocks for at least the given number of
+-- microseconds.
+slowDown :: MonadUnliftIO m => Int -> m a -> m a
+slowDown minTimeUsec = bracket' before after . const
+  where
+    before = getMonotonicTimeNSec
+    after startTime = do
+      endTime <- getMonotonicTimeNSec
+      let margin = minTimeUsec - fromIntegral ((endTime - startTime) `div` 1000)
+      when (margin > 0) $ threadDelay margin
+    -- NB: Not UnliftIO.bracket because of uninterruptibleMask
+    bracket' a b c = withRunInIO $ \run -> E.bracket a b (run . c)
 
 -- | Emit a \"command\" event with one argument for the X server. This is used
 -- to send events that can be received by event hooks in the XMonad process and
 -- acted upon in that context.
-sendCommandEvent :: Atom -> Atom -> X11Property ()
+sendCommandEvent :: MonadIO m => Atom -> Atom -> X11PropertyT m ()
 sendCommandEvent cmd arg = sendCustomEvent cmd arg Nothing
 
 -- | Similar to 'sendCommandEvent', but with an argument of type 'X11Window'.
 sendWindowEvent :: Atom -> X11Window -> X11Property ()
 sendWindowEvent cmd win = sendCustomEvent cmd cmd (Just win)
 
--- | Builds a new 'X11Context' containing a connection to the default
+-- | Builds a new 'X11Context' containing a connection to the given
 -- X11 display and its root window.
 --
 -- If the X11 connection could not be opened, it will throw
--- @'Control.Exception.userError' "openDisplay"@. This can occur if the
+-- @'userError' "openDisplay"@. This can occur if the
 -- @X -maxclients@ limit has been exceeded.
-getX11Context :: DisplayName -> IO X11Context
-getX11Context ctxDisplayName = do
-  d <- openDisplay $ fromDisplayName ctxDisplayName
-  ctxRoot <- rootWindow d $ defaultScreen d
-  ctxAtomCache <- newMVar []
-  return $ X11Context{ctxDisplay=d,..}
+withX11Context
+  :: (HasCallStack, MonadUnliftIO m)
+  => DisplayName -- ^ Display name.
+  -> (X11Context -> m a) -- ^ Action to run.
+  -> m a
+withX11Context ctxDisplayName = bracket (liftIO open) (liftIO . close)
+  where
+    dn = fromDisplayName ctxDisplayName
+    open = do
+      d <- logOpen openDisplay dn
+      ctxRoot <- rootWindow d (defaultScreen d)
+      ctxAtomCache <- newMVar []
+      return $ X11Context{ctxDisplay=d,..}
+    close = logClose closeDisplay . ctxDisplay
+
+    logOpen f = logAround DEBUG ("XOpenDisplay " ++ dn) . f
+    logClose f = logAround DEBUG ("XCloseDisplay " ++ dn) . f
 
 -- | Apply the given function to the given window in order to obtain the X11
 -- property with the given name, or Nothing if no such property can be read.
@@ -261,10 +430,11 @@ fetchWindowHints window = do
 
 -- | Emit an event of type @ClientMessage@ that can be listened to and consumed
 -- by XMonad event hooks.
-sendCustomEvent :: Atom -- ^ Command
+sendCustomEvent :: MonadIO m
+                => Atom -- ^ Command
                 -> Atom -- ^ Argument
                 -> Maybe X11Window -- ^ 'Just' a window, or 'Nothing' for the root window
-                -> X11Property ()
+                -> X11PropertyT m ()
 sendCustomEvent cmd arg win = do
   X11Context{..} <- ask
   let win' = fromMaybe ctxRoot win
@@ -277,11 +447,9 @@ sendCustomEvent cmd arg win = do
 -- | Post the provided X11Property to taffybar's dedicated X11 thread, and wait
 -- for the result. The provided default value will be returned in the case of an
 -- error.
-postX11RequestSyncProp :: X11Property a -> a -> X11Property a
-postX11RequestSyncProp prop a = do
-  c <- ask
-  let action = runReaderT prop c
-  lift $ postX11RequestSyncDef a action
+postX11RequestSyncProp :: MonadUnliftIO m => X11PropertyT m a -> a -> X11PropertyT m a
+postX11RequestSyncProp prop a = withRunInIO $ \run ->
+  postX11RequestSyncDef a (run prop)
 
 -- | 'X11Property' which reflects whether or not the provided 'RROutput' is active.
 isActiveOutput :: XRRScreenResources -> RROutput -> X11Property Bool
@@ -307,6 +475,14 @@ getPrimaryOutputNumber = do
   return $ primary `elemIndex` outputs
 
 -- | Move the given 'X11Window' to the bottom of the X11 window stack.
-doLowerWindow :: X11Window -> X11Property ()
+doLowerWindow :: MonadIO m => X11Window -> X11PropertyT m ()
 doLowerWindow window =
-  asks ctxDisplay >>= lift . flip lowerWindow window
+  getDisplay >>= liftIO . flip lowerWindow window
+
+------------------------------------------------------------------------
+
+logHere :: MonadIO m => Priority -> String -> m ()
+logHere p = liftIO . logM "System.Taffybar.Information.X11DesktopInfo" p
+
+logAround :: MonadUnliftIO m => Priority -> String -> m a -> m a
+logAround p msg = bracket_ (logHere p (msg ++ "...")) (logHere p ("..." ++ msg))
