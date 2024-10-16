@@ -211,7 +211,7 @@ eventLoop dispatch = do
   liftIO $ do
     selectInput d w $ propertyChangeMask .|. substructureNotifyMask
     allocaXEvent $ \e -> forever $ do
-      event <- nextEvent d e >> getEvent e
+      event <- nextEventIntr d e >> getEvent e
       case event of
         MapNotifyEvent { ev_window = window } ->
           selectInput d window propertyChangeMask

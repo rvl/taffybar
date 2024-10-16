@@ -22,6 +22,7 @@ module System.Taffybar.Information.SafeX11
   , postX11RequestSyncDef
   , rawGetWindowPropertyBytes
   , safeGetGeometry
+  , nextEventIntr
   )
   where
 
@@ -230,3 +231,10 @@ foreign import ccall safe "HsXlib.h XGetGeometry"
         xGetGeometry :: Display -> Drawable ->
                 Ptr Window -> Ptr Position -> Ptr Position -> Ptr Dimension ->
                 Ptr Dimension -> Ptr Dimension -> Ptr CInt -> IO Status
+
+-- | Interface to the X11 library function @XNextEvent()@.
+--
+-- This is the same as "Graphics.X11.Xlib.Event.nextEvent", except
+-- that 'nextEventIntr' is marked @interruptible@ instead of @safe@.
+foreign import ccall interruptible "HsXlib.h XNextEvent"
+    nextEventIntr :: Display -> XEventPtr  -> IO ()
