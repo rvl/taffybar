@@ -188,7 +188,7 @@ prop_context_too_trivial = withMaxSuccess 50 $ monadicIO $
 
 prop_taffybarConfig :: GenSimpleConfig -> Property
 prop_taffybarConfig cfg = within 1_000_000 $ monadicIO $ do
-  let cfg' = toTaffyConfig (toSimpleConfig cfg)
+  let cfg' = toTaffybarConfig (toSimpleConfig cfg)
   a <- run $ with (buildContext cfg') $ \_context -> do
     pure True
   assert a
