@@ -15,6 +15,7 @@
 module System.Taffybar.Information.SafeX11
   ( module Graphics.X11.Xlib
   , module Graphics.X11.Xlib.Extras
+  , logErrorEvents
   , getWMHints
   , getWindowProperty8
   , getWindowProperty16
@@ -44,7 +45,7 @@ import System.Timeout
 import Text.Printf
 import UnliftIO.Chan (Chan, newChan, readChan, writeChan)
 import UnliftIO.Concurrent (ThreadId, myThreadId, forkIO)
-import UnliftIO.Exception (Exception, IOException, catch)
+import UnliftIO.Exception (Exception, IOException, bracket, catch)
 
 logHere :: Priority -> String -> IO ()
 logHere = logM "System.Taffybar.Information.SafeX11"
@@ -123,22 +124,24 @@ x11Thread :: ThreadId
 x11Thread = unsafePerformIO $ forkIO startHandlingX11Requests
 
 withErrorHandler :: XErrorHandler -> IO a -> IO a
-withErrorHandler new_handler action = do
-    handler <- mkXErrorHandler (\d e -> new_handler d e >> return 0)
-    original <- _xSetErrorHandler handler
-    res <- action
-    _ <- _xSetErrorHandler original
-    return res
+withErrorHandler handler = bracket install uninstall . const
+  where
+    c_handler d e = handler d e >> return 0
+    install = mkXErrorHandler c_handler >>= _xSetErrorHandler
+    uninstall = _xSetErrorHandler
 
 deriving instance Show ErrorEvent
 
+logErrorEvents :: IO a -> IO a
+logErrorEvents = withErrorHandler $ \_ xerrptr -> do
+  ee <- getErrorEvent xerrptr
+  logHere WARNING $ "XLib error event: " ++ show ee
+
 startHandlingX11Requests :: IO ()
-startHandlingX11Requests =
-  withErrorHandler handleError handleX11Requests
-  where handleError _ xerrptr = do
-          ee <- getErrorEvent xerrptr
-          logHere WARNING $
-                  printf "Handling X11 error with error handler: %s" $ show ee
+startHandlingX11Requests = do
+  labelMyThread "x11Thread"
+  logHere INFO "startHandlingX11Requests"
+  logErrorEvents handleX11Requests
 
 handleX11Requests :: IO ()
 handleX11Requests = do
